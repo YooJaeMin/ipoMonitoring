@@ -17,8 +17,6 @@ TICKER = "FRMI"
 MONITORING_ACTIVE = True
 LAST_NOTIFICATION_TIME = None
 LISTING_CONFIRMED = False
-SCHEDULER_THREAD = None
-SCHEDULER_RUNNING = False
 
 def get_kst_time():
     """한국 시간(KST)을 반환합니다."""
@@ -200,14 +198,14 @@ def get_stock_data(ticker):
         logging.error(f"주식 데이터 조회 중 예상치 못한 오류: {e}")
         return None
 
-def check_stock_listing():
-    """주식 상장 상태를 확인하는 핵심 로직"""
+def main(mytimer: func.TimerRequest) -> None:
+    """Timer Trigger 함수 - 5분마다 실행"""
     global MONITORING_ACTIVE, LISTING_CONFIRMED
     
     # 모니터링이 비활성화된 경우 종료
     if not MONITORING_ACTIVE or LISTING_CONFIRMED:
         logging.info("모니터링이 비활성화되어 있습니다.")
-        return False
+        return
     
     kst_time = get_kst_time()
     utc_timestamp = datetime.datetime.utcnow().replace(
@@ -219,7 +217,7 @@ def check_stock_listing():
     # 모니터링 시간 확인
     if not is_monitoring_time():
         logging.info("현재 시간은 모니터링 시간이 아닙니다. (21:30 ~ 06:00 KST)")
-        return False
+        return
 
     try:
         # yfinance 대신 직접 API 호출
@@ -238,10 +236,8 @@ def check_stock_listing():
                 MONITORING_ACTIVE = False
                 LISTING_CONFIRMED = True
                 logging.info("상장이 확인되어 모니터링을 종료합니다.")
-                return True
             else:
                 logging.error("상장 확인 이메일 발송에 실패했습니다.")
-                return False
         else:
             # 아직 상장되지 않음
             logging.info("%s not listed yet.", TICKER)
@@ -257,146 +253,6 @@ def check_stock_listing():
                     logging.error("모니터링 상태 이메일 발송에 실패했습니다.")
             else:
                 logging.info("1시간이 경과하지 않아 이메일을 발송하지 않습니다.")
-            
-            return False
                 
     except Exception as e:
         logging.error(f"주식 데이터 조회 중 오류: {str(e)}")
-        return False
-
-def scheduler_worker():
-    """5분마다 주식 상장 상태를 확인하는 스케줄러"""
-    global SCHEDULER_RUNNING, MONITORING_ACTIVE, LISTING_CONFIRMED
-    
-    logging.info("스케줄러가 시작되었습니다. 5분마다 실행됩니다.")
-    
-    while SCHEDULER_RUNNING and MONITORING_ACTIVE and not LISTING_CONFIRMED:
-        try:
-            # 주식 상장 상태 확인
-            check_stock_listing()
-            
-            # 5분 대기 (300초)
-            for _ in range(300):  # 5분 = 300초
-                if not SCHEDULER_RUNNING or not MONITORING_ACTIVE or LISTING_CONFIRMED:
-                    break
-                time.sleep(1)
-                
-        except Exception as e:
-            logging.error(f"스케줄러 실행 중 오류: {e}")
-            time.sleep(60)  # 오류 발생 시 1분 대기 후 재시도
-    
-    logging.info("스케줄러가 종료되었습니다.")
-
-def start_scheduler():
-    """스케줄러 시작"""
-    global SCHEDULER_THREAD, SCHEDULER_RUNNING
-    
-    if SCHEDULER_THREAD is None or not SCHEDULER_THREAD.is_alive():
-        SCHEDULER_RUNNING = True
-        SCHEDULER_THREAD = threading.Thread(target=scheduler_worker, daemon=True)
-        SCHEDULER_THREAD.start()
-        logging.info("스케줄러가 시작되었습니다.")
-        return True
-    else:
-        logging.info("스케줄러가 이미 실행 중입니다.")
-        return False
-
-def stop_scheduler():
-    """스케줄러 중지"""
-    global SCHEDULER_RUNNING
-    
-    SCHEDULER_RUNNING = False
-    logging.info("스케줄러 중지 요청이 전송되었습니다.")
-
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP Trigger 함수"""
-    global MONITORING_ACTIVE, LISTING_CONFIRMED, SCHEDULER_RUNNING
-    
-    # 요청 파라미터 확인
-    action = req.params.get('action', 'start')
-    
-    if action == 'start':
-        # 모니터링 시작
-        if not MONITORING_ACTIVE or LISTING_CONFIRMED:
-            MONITORING_ACTIVE = True
-            LISTING_CONFIRMED = False
-            logging.info("모니터링이 다시 활성화되었습니다.")
-        
-        # 스케줄러 시작
-        scheduler_started = start_scheduler()
-        
-        # 즉시 한 번 실행
-        result = check_stock_listing()
-        
-        return func.HttpResponse(
-            json.dumps({
-                "status": "started",
-                "message": "모니터링이 시작되었습니다. 5분마다 자동으로 실행됩니다.",
-                "scheduler_started": scheduler_started,
-                "immediate_check_result": result,
-                "ticker": TICKER,
-                "monitoring_active": MONITORING_ACTIVE,
-                "scheduler_running": SCHEDULER_RUNNING
-            }),
-            status_code=200,
-            headers={"Content-Type": "application/json"}
-        )
-    
-    elif action == 'stop':
-        # 모니터링 중지
-        stop_scheduler()
-        MONITORING_ACTIVE = False
-        
-        return func.HttpResponse(
-            json.dumps({
-                "status": "stopped",
-                "message": "모니터링이 중지되었습니다.",
-                "ticker": TICKER,
-                "monitoring_active": MONITORING_ACTIVE,
-                "scheduler_running": SCHEDULER_RUNNING
-            }),
-            status_code=200,
-            headers={"Content-Type": "application/json"}
-        )
-    
-    elif action == 'status':
-        # 상태 확인
-        return func.HttpResponse(
-            json.dumps({
-                "status": "status",
-                "message": "현재 모니터링 상태",
-                "ticker": TICKER,
-                "monitoring_active": MONITORING_ACTIVE,
-                "listing_confirmed": LISTING_CONFIRMED,
-                "scheduler_running": SCHEDULER_RUNNING,
-                "last_notification_time": LAST_NOTIFICATION_TIME.isoformat() if LAST_NOTIFICATION_TIME else None
-            }),
-            status_code=200,
-            headers={"Content-Type": "application/json"}
-        )
-    
-    elif action == 'check':
-        # 즉시 한 번만 확인
-        result = check_stock_listing()
-        
-        return func.HttpResponse(
-            json.dumps({
-                "status": "checked",
-                "message": "즉시 확인이 완료되었습니다.",
-                "result": result,
-                "ticker": TICKER
-            }),
-            status_code=200,
-            headers={"Content-Type": "application/json"}
-        )
-    
-    else:
-        return func.HttpResponse(
-            json.dumps({
-                "status": "error",
-                "message": "잘못된 action입니다. 사용 가능한 action: start, stop, status, check",
-                "ticker": TICKER
-            }),
-            status_code=400,
-            headers={"Content-Type": "application/json"}
-        )
